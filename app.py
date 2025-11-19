@@ -51,7 +51,7 @@ def buscar_dados_atualizados():
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
         ALVOS = {
-            "SP 098": ["SP 098", "MOGI-BERTIOGA", "DOM PAULO"],
+            "SP 098": ["SP 098", "MOGI-BERTIOGA", "DOM PAULO", "MOGI BERTIOGA"],
             "SP 055": ["SP 055", "RIO-SANTOS", "MANOEL HYPPOLITO", "RIO SANTOS"], 
             "SP 065": ["SP 065", "DOM PEDRO"],
             "SP 070": ["SP 070", "AYRTON SENNA", "CARVALHO PINTO"],
@@ -62,30 +62,20 @@ def buscar_dados_atualizados():
         
         DESTINOS_INVALIDOS = ["AYRTON", "SENNA", "CARVALHO", "PINTO", "DOM", "PEDRO", "MOGI", "DUTRA", "SP", "RODOVIA", "VIA", "OESTE", "LESTE", "NORTE", "SUL"]
 
-        # --- AQUI ESTÁ A MÁGICA: BIBLIOTECA DE TRADUÇÃO ---
-        # Mapeia (Rodovia, Sentido Genérico) -> Nome da Cidade
+        # Mapeia (Rodovia, Sentido Genérico) -> Nome da Cidade/Sentido Real
         TRADUCAO_SENTIDOS = {
-            # SP 055 - Rio Santos
             ("SP 055", "LESTE"): "Bertioga / S. Sebastião",
-            ("SP 055", "NORTE"): "Ubatuba", # As vezes aparece como Norte
+            ("SP 055", "NORTE"): "Ubatuba",
             ("SP 055", "OESTE"): "Guarujá / Santos",
             ("SP 055", "SUL"): "Santos",
-
-            # SP 098 - Mogi Bertioga
             ("SP 098", "SUL"): "Bertioga (Descida)",
             ("SP 098", "NORTE"): "Mogi das Cruzes (Subida)",
-
-            # SP 070 - Ayrton Senna
             ("SP 070", "LESTE"): "Interior",
             ("SP 070", "OESTE"): "Capital / SP",
-
-            # SP 065 - Dom Pedro
             ("SP 065", "SUL"): "Jacareí",
             ("SP 065", "LESTE"): "Jacareí",
             ("SP 065", "NORTE"): "Campinas",
             ("SP 065", "OESTE"): "Campinas",
-
-            # SP 088 - Mogi Dutra
             ("SP 088", "SUL"): "Mogi das Cruzes",
             ("SP 088", "NORTE"): "Arujá / Dutra",
         }
@@ -93,66 +83,80 @@ def buscar_dados_atualizados():
         relatorio = []
         ids_processados = set()
 
-        marcadores = soup.find_all("span", string=lambda text: text and "km inicial" in text.lower())
+        # 1. Encontrar os CARDS PAIS (Container principal da Rodovia)
+        # Identificamos pela div que tem o atributo 'data-id' preenchido com o nome da rodovia
+        cards_pais = soup.find_all("div", attrs={"data-id": True})
 
-        for marcador in marcadores:
+        for card_pai in cards_pais:
             try:
-                card = marcador.parent.parent.parent.parent
-                texto_bruto = card.get_text(" ", strip=True)
-                texto_upper = texto_bruto.upper()
+                texto_pai = card_pai.get_text(" ", strip=True).upper()
+                data_id_pai = card_pai.get("data-id", "").upper()
                 
-                if any(proibido in texto_upper for proibido in TERMOS_PROIBIDOS): continue 
+                # Filtro de exclusão
+                if any(proibido in texto_pai for proibido in TERMOS_PROIBIDOS): continue 
 
+                # Identificar qual Rodovia é
                 rodovia_id = None
                 for codigo, nomes in ALVOS.items():
-                    if any(n in texto_upper for n in nomes):
+                    # Verifica tanto no texto visível quanto no atributo data-id
+                    if any(n in texto_pai for n in nomes) or any(n in data_id_pai for n in nomes):
                         rodovia_id = codigo
                         break
                 
-                if rodovia_id:
-                    km_ini = "0"; km_fim = "0"; local_texto = "Trecho não id."
-                    match_km = re.search(r"KM INICIAL:\s*([\d,]+).*?KM FINAL:\s*([\d,]+)", texto_upper)
-                    if match_km:
-                        km_ini = match_km.group(1)
-                        km_fim = match_km.group(2)
-                        local_texto = f"Km {km_ini} ao {km_fim}"
+                if not rodovia_id: continue
 
-                    card_id = f"{rodovia_id}-{km_ini}-{km_fim}"
-                    if card_id in ids_processados: continue 
-                    ids_processados.add(card_id)
+                # --- DETECTAR SENTIDO GERAL DO CARD PAI ---
+                sentido = "-"
+                # Tenta achar Destino
+                match_destino = re.search(r"DESTINO\(S\):\s*(.*?)(?:\s+KM|$)", texto_pai)
+                if match_destino:
+                    candidato = match_destino.group(1).strip()
+                    if not any(inv in candidato for inv in DESTINOS_INVALIDOS) and len(candidato) > 2:
+                        sentido = candidato.split()[0]
 
-                    status = "Normal"; cor = "🟢"
-                    if "LENTO" in texto_upper: status = "Lento"; cor = "🟡"
-                    if "CONGESTIONADO" in texto_upper: status = "Congestionado"; cor = "🔴"
-                    if "PARADO" in texto_upper: status = "Parado Total"; cor = "⚫"
-                    if "PARE E SIGA" in texto_upper: status = "Pare e Siga"; cor = "⛔"
-                    if "INTERDIÇÃO" in texto_upper: status = "Interditado"; cor = "⛔"
-
-                    # --- LÓGICA DE SENTIDO (COM TRADUÇÃO) ---
-                    sentido = "-"
+                # Fallback: Leste/Oeste/Norte/Sul no texto do cabeçalho
+                if sentido == "-" or sentido == "SP":
+                    # Procura no cabeçalho específico
+                    header_div = card_pai.find("div", class_="title-font")
+                    header_text = header_div.get_text(strip=True).upper() if header_div else texto_pai
                     
-                    # 1. Tenta pegar do site
-                    match_destino = re.search(r"DESTINO\(S\):\s*(.*?)(?:\s+KM|$)", texto_upper)
-                    if match_destino:
-                        canditado = match_destino.group(1).strip()
-                        if not any(inv in canditado for inv in DESTINOS_INVALIDOS) and len(canditado) > 2:
-                            sentido = canditado.split()[0]
+                    if "(SUL)" in header_text or " SUL" in header_text: sentido = "SUL"
+                    elif "(NORTE)" in header_text or " NORTE" in header_text: sentido = "NORTE"
+                    elif "(LESTE)" in header_text or " LESTE" in header_text: sentido = "LESTE"
+                    elif "(OESTE)" in header_text or " OESTE" in header_text: sentido = "OESTE"
 
-                    # 2. Fallback: Pega Leste/Oeste do título se não achou destino bom
-                    if sentido == "-" or sentido == "SP":
-                        if "(SUL)" in texto_upper or " SUL " in texto_upper: sentido = "SUL"
-                        elif "(NORTE)" in texto_upper or " NORTE " in texto_upper: sentido = "NORTE"
-                        elif "(LESTE)" in texto_upper or " LESTE " in texto_upper: sentido = "LESTE"
-                        elif "(OESTE)" in texto_upper or " OESTE " in texto_upper: sentido = "OESTE"
+                # Tradução do Sentido
+                chave_traducao = (rodovia_id, sentido)
+                if chave_traducao in TRADUCAO_SENTIDOS:
+                    sentido = TRADUCAO_SENTIDOS[chave_traducao]
 
-                    # 3. APLICAÇÃO DA BIBLIOTECA DE TRADUÇÃO
-                    # Verifica se temos um nome melhor para esse par (Rodovia, Sentido)
-                    chave_traducao = (rodovia_id, sentido)
-                    if chave_traducao in TRADUCAO_SENTIDOS:
-                        sentido = TRADUCAO_SENTIDOS[chave_traducao]
+                # --- BUSCAR CARDS FILHOS (Trafego Containers) ---
+                # No HTML, os alertas específicos são divs com a classe "trafego-container"
+                trechos_filhos = card_pai.find_all("div", class_="trafego-container")
+                
+                hora_brasil = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M")
 
-                    hora_brasil = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M")
+                if not trechos_filhos:
+                    # Se não tem filhos "trafego-container", assumimos que está tudo Normal ou pegamos o status do pai
+                    # Mas geralmente o site coloca 'trafego-container' mesmo para 'Normal' ou deixa vazio se normal.
+                    # Se estiver vazio, vamos assumir status Normal pegando o KM do cabeçalho.
+                    
+                    status = "Normal"
+                    cor = "🟢"
+                    local_texto = "Trecho Total"
+                    
+                    match_km_pai = re.search(r"KM INICIAL:\s*([\d,]+).*?KM FINAL:\s*([\d,]+)", texto_pai)
+                    if match_km_pai:
+                        local_texto = f"Km {match_km_pai.group(1)} ao {match_km_pai.group(2)}"
 
+                    # Checa se o pai diz algo diferente de normal no texto geral (fallback)
+                    if "LENTO" in texto_pai: status = "Lento"; cor = "🟡"
+                    if "CONGESTIONADO" in texto_pai: status = "Congestionado"; cor = "🔴"
+                    if "PARADO" in texto_pai: status = "Parado Total"; cor = "⚫"
+                    if "INTERDIÇÃO" in texto_pai or "BLOQUEIO" in texto_pai: status = "Interditado"; cor = "⛔"
+                    if "PARE E SIGA" in texto_pai: status = "Pare e Siga"; cor = "⛔"
+
+                    unique_id = f"{rodovia_id}-{sentido}-MAIN"
                     relatorio.append({
                         "Icone": cor,
                         "Rodovia": rodovia_id,
@@ -161,7 +165,53 @@ def buscar_dados_atualizados():
                         "Trecho": local_texto,
                         "Atualizacao": hora_brasil
                     })
-            except: continue
+                
+                else:
+                    # TEM FILHOS (Alertas específicos)
+                    for child in trechos_filhos:
+                        texto_child = child.get_text(" ", strip=True).upper()
+                        
+                        # Pega KM dos atributos data (muito mais seguro)
+                        # Ex: <span data-trafego-km-inicial="157194">109,000</span>
+                        km_ini_span = child.find("span", attrs={"data-trafego-km-inicial": True})
+                        km_fim_span = child.find("span", attrs={"data-trafego-km-final": True})
+                        
+                        km_ini = km_ini_span.get_text(strip=True) if km_ini_span else "?"
+                        km_fim = km_fim_span.get_text(strip=True) if km_fim_span else "?"
+                        
+                        trecho_fmt = f"Km {km_ini} ao {km_fim}"
+
+                        # Pega Status e Cor
+                        status = "Normal"; cor = "🟢"
+                        
+                        # Tenta achar a bolinha de cor se existir, ou vai pelo texto
+                        if "LENTO" in texto_child: status = "Lento"; cor = "🟡"
+                        elif "CONGESTIONADO" in texto_child: status = "Congestionado"; cor = "🔴"
+                        elif "PARADO" in texto_child: status = "Parado Total"; cor = "⚫"
+                        elif "INTERDIÇÃO" in texto_child or "BLOQUEADO" in texto_child: status = "Interditado"; cor = "⛔"
+                        elif "PARE E SIGA" in texto_child: status = "Pare e Siga"; cor = "⛔"
+                        elif "OBRAS" in texto_child: status = "Obras"; cor = "🟠" # Opcional
+                        
+                        # Se o status for normal dentro de um child, as vezes nem exibimos, 
+                        # mas se está na lista de alertas, provavelmente é relevante.
+                        
+                        # Evita duplicatas exatas
+                        child_id = f"{rodovia_id}-{sentido}-{km_ini}-{km_fim}-{status}"
+                        if child_id in ids_processados: continue
+                        ids_processados.add(child_id)
+
+                        relatorio.append({
+                            "Icone": cor,
+                            "Rodovia": rodovia_id,
+                            "Status": status,
+                            "Sentido": sentido,
+                            "Trecho": trecho_fmt,
+                            "Atualizacao": hora_brasil
+                        })
+
+            except Exception as e:
+                print(f"Erro ao processar card: {e}")
+                continue
             
         df = pd.DataFrame(relatorio)
         if not df.empty:
@@ -197,7 +247,8 @@ if not df.empty:
     
     kpi1, kpi2 = st.columns(2)
     kpi1.metric("Monitorados", len(df_filtrado))
-    kpi2.metric("Com Problemas", len(df_filtrado[df_filtrado['Status'] != 'Normal']), delta_color="inverse")
+    problemas = df_filtrado[~df_filtrado['Status'].isin(['Normal', 'Livre'])]
+    kpi2.metric("Com Problemas", len(problemas), delta_color="inverse")
 
     st.divider()
 
@@ -218,7 +269,6 @@ if not df.empty:
 
     else:
         for index, row in df_filtrado.iterrows():
-            cor_box = "green"
             icone_status = "✅"
             if row['Status'] == "Lento": icone_status = "⚠️"
             if row['Status'] == "Congestionado": icone_status = "🔴"
