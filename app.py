@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import time
+import os
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -14,22 +15,34 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- FUNÇÕES DO ROBÔ ---
+# --- FUNÇÃO INTELIGENTE DO ROBÔ ---
 @st.cache_data(ttl=300) 
 def buscar_dados_atualizados():
     options = Options()
     options.add_argument("--headless") 
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") # Vital para servidores Linux/Docker
+    options.add_argument("--disable-dev-shm-usage") # Vital para Linux
     options.add_argument("--window-size=1920,1080")
     
     driver = None
     try:
-        # Tenta instalar/achar o driver automaticamente
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # --- ESTRATÉGIA DUPLA (NUVEM vs LOCAL) ---
         
+        # Tentativa 1: Modo NUVEM (Linux/Streamlit Cloud)
+        # Verifica se existe o executável do Chromium no local padrão do Linux
+        if os.path.exists("/usr/bin/chromium") and os.path.exists("/usr/bin/chromedriver"):
+            options.binary_location = "/usr/bin/chromium"
+            service = Service("/usr/bin/chromedriver")
+            driver = webdriver.Chrome(service=service, options=options)
+        
+        # Tentativa 2: Modo LOCAL (Seu Windows)
+        else:
+            # Se não achar os arquivos do Linux, usa o gerenciador automático
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+        
+        # --- NAVEGAÇÃO ---
         url = "https://cci.artesp.sp.gov.br/"
         driver.get(url)
         time.sleep(8) 
@@ -104,7 +117,8 @@ def buscar_dados_atualizados():
         return pd.DataFrame(relatorio).drop_duplicates()
 
     except Exception as e:
-        st.error(f"Erro ao buscar dados: {e}")
+        # Mostra o erro na tela para facilitar a depuração
+        st.error(f"Erro técnico no Selenium: {e}")
         return pd.DataFrame()
     finally:
         if driver: driver.quit()
