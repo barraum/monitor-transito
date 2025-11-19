@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import os
+from datetime import datetime, timedelta, timezone # <--- ADICIONADO timezone AQUI
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -15,42 +16,32 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- FUNÇÃO INTELIGENTE DO ROBÔ ---
+# --- FUNÇÃO DO ROBÔ ---
 @st.cache_data(ttl=300) 
 def buscar_dados_atualizados():
     options = Options()
     options.add_argument("--headless") 
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") # Vital para Linux
+    options.add_argument("--disable-dev-shm-usage") 
     options.add_argument("--window-size=1920,1080")
     
     driver = None
     try:
-        # --- ESTRATÉGIA DUPLA (NUVEM vs LOCAL) ---
-        
-        # Tentativa 1: Modo NUVEM (Linux/Streamlit Cloud)
-        # Verifica se existe o executável do Chromium no local padrão do Linux
+        # Estratégia Híbrida (Nuvem/Local)
         if os.path.exists("/usr/bin/chromium") and os.path.exists("/usr/bin/chromedriver"):
             options.binary_location = "/usr/bin/chromium"
             service = Service("/usr/bin/chromedriver")
             driver = webdriver.Chrome(service=service, options=options)
-        
-        # Tentativa 2: Modo LOCAL (Seu Windows)
         else:
-            # Se não achar os arquivos do Linux, usa o gerenciador automático
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
         
-        # --- NAVEGAÇÃO ---
-        url = "https://cci.artesp.sp.gov.br/"
-        driver.get(url)
+        driver.get("https://cci.artesp.sp.gov.br/")
         time.sleep(8) 
         
-        html = driver.page_source
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # --- ALVOS ---
         ALVOS = {
             "SP 098": ["SP 098", "MOGI-BERTIOGA", "DOM PAULO"],
             "SP 055": ["SP 055", "RIO-SANTOS", "MANOEL HYPPOLITO", "RIO SANTOS"], 
@@ -59,11 +50,7 @@ def buscar_dados_atualizados():
             "SP 088": ["SP 088", "MOGI DUTRA"],
         }
 
-        # --- EXCLUSÕES ---
-        TERMOS_PROIBIDOS = [
-            "CÔNEGO DOMÊNICO", "CONEGO DOMENICO", "RANGONI",
-            "PADRE MANOEL", "NÓBREGA", "NOBREGA"
-        ]
+        TERMOS_PROIBIDOS = ["CÔNEGO DOMÊNICO", "CONEGO DOMENICO", "RANGONI", "PADRE MANOEL", "NÓBREGA", "NOBREGA"]
 
         relatorio = []
         marcadores = soup.find_all("span", string=lambda text: text and "km inicial" in text.lower())
@@ -73,8 +60,7 @@ def buscar_dados_atualizados():
                 card = marcador.parent.parent.parent.parent
                 texto = card.get_text(" ", strip=True).upper()
                 
-                if any(proibido in texto for proibido in TERMOS_PROIBIDOS):
-                    continue 
+                if any(proibido in texto for proibido in TERMOS_PROIBIDOS): continue 
 
                 rodovia_id = None
                 for codigo, nomes in ALVOS.items():
@@ -83,8 +69,7 @@ def buscar_dados_atualizados():
                         break
                 
                 if rodovia_id:
-                    status = "Normal"
-                    cor = "🟢"
+                    status = "Normal"; cor = "🟢"
                     if "LENTO" in texto: status = "Lento"; cor = "🟡"
                     if "CONGESTIONADO" in texto: status = "Congestionado"; cor = "🔴"
                     if "PARADO" in texto: status = "Parado Total"; cor = "⚫"
@@ -104,28 +89,30 @@ def buscar_dados_atualizados():
                             local = f"Km {km_ini} ao {km_fim}"
                         except: pass
 
+                    # CORREÇÃO AQUI: Usando datetime.now(timezone.utc)
+                    hora_brasil = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M")
+
                     relatorio.append({
                         "Icone": cor,
                         "Rodovia": rodovia_id,
                         "Status": status,
                         "Sentido": sentido,
                         "Trecho": local,
-                        "Atualizacao": time.strftime("%H:%M")
+                        "Atualizacao": hora_brasil
                     })
             except: continue
             
         return pd.DataFrame(relatorio).drop_duplicates()
 
     except Exception as e:
-        # Mostra o erro na tela para facilitar a depuração
-        st.error(f"Erro técnico no Selenium: {e}")
+        st.error(f"Erro técnico: {e}")
         return pd.DataFrame()
     finally:
         if driver: driver.quit()
 
 # --- FRONTEND ---
 st.title("🚗 Monitoramento de Rodovias SP")
-st.markdown("Dados filtrados da **CCI ARTESP**")
+st.markdown("Dados filtrados da **CCI ARTESP** (Horário de Brasília)")
 
 col1, col2 = st.columns([1, 4])
 with col1:
