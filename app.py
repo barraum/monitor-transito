@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import os
-from datetime import datetime, timedelta, timezone # <--- ADICIONADO timezone AQUI
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -16,6 +16,15 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- CSS PARA MELHORAR NO CELULAR ---
+# Isso remove margens desnecessárias em telas pequenas
+st.markdown("""
+<style>
+    .block-container { padding-top: 1rem; padding-bottom: 0rem; }
+    [data-testid="stMetricValue"] { font-size: 1.5rem; }
+</style>
+""", unsafe_allow_html=True)
+
 # --- FUNÇÃO DO ROBÔ ---
 @st.cache_data(ttl=300) 
 def buscar_dados_atualizados():
@@ -28,7 +37,6 @@ def buscar_dados_atualizados():
     
     driver = None
     try:
-        # Estratégia Híbrida (Nuvem/Local)
         if os.path.exists("/usr/bin/chromium") and os.path.exists("/usr/bin/chromedriver"):
             options.binary_location = "/usr/bin/chromium"
             service = Service("/usr/bin/chromedriver")
@@ -89,7 +97,6 @@ def buscar_dados_atualizados():
                             local = f"Km {km_ini} ao {km_fim}"
                         except: pass
 
-                    # CORREÇÃO AQUI: Usando datetime.now(timezone.utc)
                     hora_brasil = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M")
 
                     relatorio.append({
@@ -111,38 +118,75 @@ def buscar_dados_atualizados():
         if driver: driver.quit()
 
 # --- FRONTEND ---
-st.title("🚗 Monitoramento de Rodovias SP")
-st.markdown("Dados filtrados da **CCI ARTESP** (Horário de Brasília)")
+st.title("🚗 Monitor Rodovias SP")
+st.caption("Dados da CCI ARTESP (Horário de Brasília)")
 
-col1, col2 = st.columns([1, 4])
-with col1:
-    if st.button("🔄 Atualizar Agora"):
+col_btn, col_view = st.columns([1, 2])
+with col_btn:
+    if st.button("🔄 Atualizar"):
         st.cache_data.clear()
         st.rerun()
 
-with st.spinner('Buscando dados atualizados...'):
+# Seletor de Visualização
+visualizacao = st.radio("Modo de Visualização:", ["📱 Cards (Celular)", "💻 Tabela (PC)"], horizontal=True)
+
+with st.spinner('Atualizando...'):
     df = buscar_dados_atualizados()
 
 if not df.empty:
     todas_rodovias = sorted(df["Rodovia"].unique())
-    selecao = st.multiselect("Filtrar Rodovia:", todas_rodovias, default=todas_rodovias)
+    selecao = st.multiselect("Filtrar:", todas_rodovias, default=todas_rodovias)
     df_filtrado = df[df["Rodovia"].isin(selecao)]
     
+    # Métricas compactas
     kpi1, kpi2 = st.columns(2)
-    kpi1.metric("Trechos Monitorados", len(df_filtrado))
-    kpi2.metric("Trechos com Problemas", len(df_filtrado[df_filtrado['Status'] != 'Normal']), delta_color="inverse")
+    kpi1.metric("Monitorados", len(df_filtrado))
+    kpi2.metric("Com Problemas", len(df_filtrado[df_filtrado['Status'] != 'Normal']), delta_color="inverse")
 
-    st.dataframe(
-        df_filtrado,
-        column_config={
-            "Icone": st.column_config.TextColumn("", width="small"),
-            "Rodovia": st.column_config.TextColumn("Rodovia", width="medium"),
-            "Status": st.column_config.TextColumn("Condição", width="medium"),
-            "Sentido": st.column_config.TextColumn("Sentido", width="small"),
-            "Trecho": st.column_config.TextColumn("Localização (KM)", width="large"),
-        },
-        hide_index=True,
-        use_container_width=True
-    )
+    st.divider()
+
+    # --- MODO TABELA (PC) ---
+    if visualizacao == "💻 Tabela (PC)":
+        st.dataframe(
+            df_filtrado,
+            column_config={
+                "Icone": st.column_config.TextColumn("", width="small"),
+                "Rodovia": st.column_config.TextColumn("Rodovia", width="small"),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+                "Sentido": st.column_config.TextColumn("Sentido", width="small"),
+                "Trecho": st.column_config.TextColumn("Local (KM)", width="medium"), # Nome mais curto
+                "Atualizacao": st.column_config.TextColumn("Hora", width="small"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+    # --- MODO CARDS (CELULAR) ---
+    else:
+        for index, row in df_filtrado.iterrows():
+            # Define a cor da borda/fundo baseado no status
+            cor_box = "green"
+            icone_status = "✅"
+            if row['Status'] == "Lento": cor_box = "orange"; icone_status = "⚠️"
+            if row['Status'] == "Congestionado": cor_box = "red"; icone_status = "🔴"
+            if row['Status'] == "Parado Total": cor_box = "black"; icone_status = "🛑"
+
+            # Cria o card visual
+            with st.container():
+                if row['Status'] == "Normal":
+                    st.success(f"**{row['Rodovia']}** - {row['Sentido']}")
+                elif row['Status'] == "Lento":
+                    st.warning(f"**{row['Rodovia']}** - {row['Sentido']}")
+                else:
+                    st.error(f"**{row['Rodovia']}** - {row['Sentido']}")
+                
+                st.markdown(f"""
+                <div style="margin-top: -15px; margin-bottom: 10px; font-size: 0.9rem;">
+                    <b>Status:</b> {icone_status} {row['Status']}<br>
+                    <b>Local:</b> {row['Trecho']}<br>
+                    <span style="color: gray; font-size: 0.8rem">Atualizado às {row['Atualizacao']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
 else:
     st.info("Nenhum alerta encontrado.")
