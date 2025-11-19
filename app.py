@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -16,8 +17,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CSS PARA MELHORAR NO CELULAR ---
-# Isso remove margens desnecessárias em telas pequenas
+# --- CSS ---
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 0rem; }
@@ -59,43 +59,80 @@ def buscar_dados_atualizados():
         }
 
         TERMOS_PROIBIDOS = ["CÔNEGO DOMÊNICO", "CONEGO DOMENICO", "RANGONI", "PADRE MANOEL", "NÓBREGA", "NOBREGA"]
+        
+        # Termos que NÃO podem ser destinos (porque são nomes da rodovia)
+        DESTINOS_INVALIDOS = ["AYRTON", "SENNA", "CARVALHO", "PINTO", "DOM", "PEDRO", "MOGI", "DUTRA", "SP", "RODOVIA"]
 
         relatorio = []
+        # Conjunto para guardar as "Impressões Digitais" e evitar duplicatas
+        ids_processados = set()
+
         marcadores = soup.find_all("span", string=lambda text: text and "km inicial" in text.lower())
 
         for marcador in marcadores:
             try:
                 card = marcador.parent.parent.parent.parent
-                texto = card.get_text(" ", strip=True).upper()
+                texto_bruto = card.get_text(" ", strip=True)
+                texto_upper = texto_bruto.upper()
                 
-                if any(proibido in texto for proibido in TERMOS_PROIBIDOS): continue 
+                if any(proibido in texto_upper for proibido in TERMOS_PROIBIDOS): continue 
 
                 rodovia_id = None
                 for codigo, nomes in ALVOS.items():
-                    if any(n in texto for n in nomes):
+                    if any(n in texto_upper for n in nomes):
                         rodovia_id = codigo
                         break
                 
                 if rodovia_id:
-                    status = "Normal"; cor = "🟢"
-                    if "LENTO" in texto: status = "Lento"; cor = "🟡"
-                    if "CONGESTIONADO" in texto: status = "Congestionado"; cor = "🔴"
-                    if "PARADO" in texto: status = "Parado Total"; cor = "⚫"
-                    if "PARE E SIGA" in texto: status = "Pare e Siga"; cor = "⛔"
-                    if "INTERDIÇÃO" in texto: status = "Interditado"; cor = "⛔"
-
-                    sentido = "-"
-                    if "DESTINO(S):" in texto:
-                        sentido = texto.split("DESTINO(S):")[1].strip().split(" ")[0]
+                    # --- LÓGICA DE KM (FUNDAMENTAL PARA DEDUPLICAR) ---
+                    km_ini = "0"
+                    km_fim = "0"
+                    local_texto = "Trecho não id."
                     
-                    local = "Trecho não id."
-                    if "KM INICIAL:" in texto:
-                        try:
-                            meio = texto.split("KM INICIAL:")[1]
-                            km_ini = meio.split("KM FINAL:")[0].strip()
-                            km_fim = meio.split("KM FINAL:")[1].split("DESTINO")[0].strip()
-                            local = f"Km {km_ini} ao {km_fim}"
-                        except: pass
+                    # Regex preciso para pegar os números (ex: 32,000)
+                    match_km = re.search(r"KM INICIAL:\s*([\d,]+).*?KM FINAL:\s*([\d,]+)", texto_upper)
+                    if match_km:
+                        km_ini = match_km.group(1)
+                        km_fim = match_km.group(2)
+                        local_texto = f"Km {km_ini} ao {km_fim}"
+
+                    # --- LÓGICA DE DEDUPLICAÇÃO INTELIGENTE ---
+                    # Cria uma identidade única: Rodovia + KM Inicial + KM Final
+                    # Assim, SP 088 Km 32 é diferente de SP 088 Km 40
+                    card_id = f"{rodovia_id}-{km_ini}-{km_fim}"
+                    
+                    if card_id in ids_processados:
+                        continue # Pula se já pegamos esse trecho exato
+                    
+                    ids_processados.add(card_id)
+
+                    # --- STATUS ---
+                    status = "Normal"; cor = "🟢"
+                    if "LENTO" in texto_upper: status = "Lento"; cor = "🟡"
+                    if "CONGESTIONADO" in texto_upper: status = "Congestionado"; cor = "🔴"
+                    if "PARADO" in texto_upper: status = "Parado Total"; cor = "⚫"
+                    if "PARE E SIGA" in texto_upper: status = "Pare e Siga"; cor = "⛔"
+                    if "INTERDIÇÃO" in texto_upper: status = "Interditado"; cor = "⛔"
+
+                    # --- LÓGICA DE SENTIDO (ANTI-AYRTON) ---
+                    sentido = "-"
+                    
+                    # 1. Tenta pegar o Destino oficial
+                    match_destino = re.search(r"DESTINO\(S\):\s*(.*?)(?:\s+KM|$)", texto_upper)
+                    if match_destino:
+                        canditado_sentido = match_destino.group(1).strip()
+                        # Verifica se o destino capturado é, na verdade, o nome da rodovia
+                        eh_invalido = any(inv in canditado_sentido for inv in DESTINOS_INVALIDOS)
+                        
+                        if not eh_invalido and len(canditado_sentido) > 2:
+                            sentido = canditado_sentido.split()[0] # Pega só a primeira palavra (ex: INTERIOR)
+                    
+                    # 2. Fallback: Se o destino falhou ou era inválido, tenta pegar (Norte/Sul/Leste/Oeste) do título
+                    if sentido == "-" or sentido == "SP":
+                        if "(SUL)" in texto_upper or " SUL " in texto_upper: sentido = "SUL"
+                        elif "(NORTE)" in texto_upper or " NORTE " in texto_upper: sentido = "NORTE"
+                        elif "(LESTE)" in texto_upper or " LESTE " in texto_upper: sentido = "LESTE"
+                        elif "(OESTE)" in texto_upper or " OESTE " in texto_upper: sentido = "OESTE"
 
                     hora_brasil = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M")
 
@@ -104,12 +141,17 @@ def buscar_dados_atualizados():
                         "Rodovia": rodovia_id,
                         "Status": status,
                         "Sentido": sentido,
-                        "Trecho": local,
+                        "Trecho": local_texto,
                         "Atualizacao": hora_brasil
                     })
             except: continue
             
-        return pd.DataFrame(relatorio).drop_duplicates()
+        # Ordena para ficar bonito (Rodovia e depois KM)
+        df = pd.DataFrame(relatorio)
+        if not df.empty:
+             df = df.sort_values(by=['Rodovia', 'Sentido'])
+
+        return df
 
     except Exception as e:
         st.error(f"Erro técnico: {e}")
@@ -127,7 +169,6 @@ with col_btn:
         st.cache_data.clear()
         st.rerun()
 
-# Seletor de Visualização
 visualizacao = st.radio("Modo de Visualização:", ["📱 Cards (Celular)", "💻 Tabela (PC)"], horizontal=True)
 
 with st.spinner('Atualizando...'):
@@ -138,14 +179,12 @@ if not df.empty:
     selecao = st.multiselect("Filtrar:", todas_rodovias, default=todas_rodovias)
     df_filtrado = df[df["Rodovia"].isin(selecao)]
     
-    # Métricas compactas
     kpi1, kpi2 = st.columns(2)
     kpi1.metric("Monitorados", len(df_filtrado))
     kpi2.metric("Com Problemas", len(df_filtrado[df_filtrado['Status'] != 'Normal']), delta_color="inverse")
 
     st.divider()
 
-    # --- MODO TABELA (PC) ---
     if visualizacao == "💻 Tabela (PC)":
         st.dataframe(
             df_filtrado,
@@ -153,35 +192,33 @@ if not df.empty:
                 "Icone": st.column_config.TextColumn("", width="small"),
                 "Rodovia": st.column_config.TextColumn("Rodovia", width="small"),
                 "Status": st.column_config.TextColumn("Status", width="small"),
-                "Sentido": st.column_config.TextColumn("Sentido", width="small"),
-                "Trecho": st.column_config.TextColumn("Local (KM)", width="medium"), # Nome mais curto
+                "Sentido": st.column_config.TextColumn("Sentido", width="medium"),
+                "Trecho": st.column_config.TextColumn("Local (KM)", width="large"),
                 "Atualizacao": st.column_config.TextColumn("Hora", width="small"),
             },
             hide_index=True,
             use_container_width=True
         )
 
-    # --- MODO CARDS (CELULAR) ---
     else:
         for index, row in df_filtrado.iterrows():
-            # Define a cor da borda/fundo baseado no status
             cor_box = "green"
             icone_status = "✅"
-            if row['Status'] == "Lento": cor_box = "orange"; icone_status = "⚠️"
-            if row['Status'] == "Congestionado": cor_box = "red"; icone_status = "🔴"
-            if row['Status'] == "Parado Total": cor_box = "black"; icone_status = "🛑"
+            if row['Status'] == "Lento": icone_status = "⚠️"
+            if row['Status'] == "Congestionado": icone_status = "🔴"
+            if row['Status'] == "Parado Total": icone_status = "🛑"
+            if row['Status'] == "Interditado": icone_status = "⛔"
 
-            # Cria o card visual
             with st.container():
-                if row['Status'] == "Normal":
-                    st.success(f"**{row['Rodovia']}** - {row['Sentido']}")
-                elif row['Status'] == "Lento":
-                    st.warning(f"**{row['Rodovia']}** - {row['Sentido']}")
-                else:
-                    st.error(f"**{row['Rodovia']}** - {row['Sentido']}")
+                # Cabeçalho colorido
+                texto_header = f"**{row['Rodovia']}** - {row['Sentido']}"
+                if row['Status'] == "Normal": st.success(texto_header)
+                elif row['Status'] == "Lento": st.warning(texto_header)
+                else: st.error(texto_header)
                 
+                # Corpo do card
                 st.markdown(f"""
-                <div style="margin-top: -15px; margin-bottom: 10px; font-size: 0.9rem;">
+                <div style="margin-top: -15px; margin-bottom: 15px; font-size: 0.9rem;">
                     <b>Status:</b> {icone_status} {row['Status']}<br>
                     <b>Local:</b> {row['Trecho']}<br>
                     <span style="color: gray; font-size: 0.8rem">Atualizado às {row['Atualizacao']}</span>
